@@ -1,0 +1,45 @@
+# 危险品同位禁配核验台 —— 全栈编排
+#
+# 宿主端口可通过环境变量覆盖:
+#   WEB_PORT  前端(nginx)宿主端口,默认 8080
+#   API_PORT  后端(FastAPI)宿主端口,默认 8000
+#
+# 一次性验收服务(真实联调 pytest + Vitest + Playwright):
+#   docker compose --profile verify run --rm verify
+
+services:
+  api:
+    build:
+      context: ./backend
+    container_name: hazmat-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: ./frontend
+    container_name: hazmat-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  verify:
+    # 一次性验收:启动真实前后端并跑全部测试,退出码即验收结论
+    profiles: ["verify"]
+    build:
+      context: .
+      dockerfile: verify/Dockerfile
+    container_name: hazmat-verify
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:80
+    restart: "no"
