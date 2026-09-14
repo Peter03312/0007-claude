@@ -25,9 +25,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# 后端测试依赖装进 venv,规避 PEP 668(externally-managed-environment)
+# 后端测试依赖装进 venv,规避 PEP 668(externally-managed-environment)。
+# 注意:requirements-dev.txt 首行是 `-r requirements.txt`,
+# 两个文件必须一起拷贝(且保名),否则 pip 无法解析 -r 引用,构建会在此中止。
 RUN python3 -m venv /opt/venv
-COPY backend/requirements-dev.txt /tmp/requirements-dev.txt
+COPY backend/requirements.txt backend/requirements-dev.txt /tmp/
 RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements-dev.txt
 
 WORKDIR /work

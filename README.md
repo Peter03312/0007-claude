@@ -74,7 +74,10 @@ docker compose --profile verify run --rm verify
 
 该服务基于 `mcr.microsoft.com/playwright/python:v1.49.1-noble`(已预装 Chromium),
 镜像内用 **venv** 安装后端依赖以规避 Ubuntu 24.04 的 PEP 668 限制,并安装
-Node.js 20 与 nginx。启动时在同一容器内**真实构建前端、真实启动 FastAPI 与 nginx**
+Node.js 20 与 nginx。镜像构建时会把后端两个依赖文件
+`backend/requirements.txt` 与 `backend/requirements-dev.txt` 一并拷入
+(后者首行 `-r requirements.txt` 引用前者,缺一即构建失败),启动时在同一容器内
+**真实构建前端、真实启动 FastAPI 与 nginx**
 (会移除 nginx 默认站并校验 :80 确实返回前端页面),然后依次执行:
 
 1. **pytest** —— 规则矩阵、边界(库位 1/99、容量 4/5、编号长度与字符集)、
