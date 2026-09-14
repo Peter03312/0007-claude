@@ -5,13 +5,18 @@
 #   API_PORT  后端(FastAPI)宿主端口,默认 8000
 #
 # 一次性验收服务(真实联调 pytest + Vitest + Playwright):
-#   docker compose --profile verify run --rm verify
+#   docker compose --profile verify run --rm --no-deps verify
+#
+# 不设置固定 container_name:Compose 会按"项目名+服务名+副本序号"生成
+# 唯一容器名,避免与机器上其他项目残留的同名容器冲突;
+# verify 镜像自包含前后端与测试(入口脚本在容器内启动真实前后端),
+# 因此用 --no-deps 运行,不占用宿主 WEB_PORT/API_PORT,也不与正在运行的
+# web/api 服务争用资源。
 
 services:
   api:
     build:
       context: ./backend
-    container_name: hazmat-api
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:
@@ -23,7 +28,6 @@ services:
   web:
     build:
       context: ./frontend
-    container_name: hazmat-web
     ports:
       - "${WEB_PORT:-8080}:80"
     depends_on:
@@ -31,15 +35,12 @@ services:
         condition: service_healthy
 
   verify:
-    # 一次性验收:启动真实前后端并跑全部测试,退出码即验收结论
+    # 一次性验收:容器内真实启动前后端并跑全部测试,退出码即验收结论。
+    # 自包含、不发布宿主端口、不依赖兄弟服务 => 可随时重复执行。
     profiles: ["verify"]
     build:
       context: .
       dockerfile: verify/Dockerfile
-    container_name: hazmat-verify
-    depends_on:
-      api:
-        condition: service_healthy
     environment:
       PLAYWRIGHT_BASE_URL: http://127.0.0.1:80
     restart: "no"

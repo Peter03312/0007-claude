@@ -69,8 +69,15 @@ WEB_PORT=9090 API_PORT=9000 docker compose up --build
 ### 一次性验收服务 `verify`
 
 ```bash
-docker compose --profile verify run --rm verify
+# --no-deps:verify 镜像自包含前后端与测试,无需(也不会)启动 web/api 兄弟服务,
+# 因此不占用宿主 WEB_PORT/API_PORT,与正在运行的服务或其他项目互不干扰。
+docker compose --profile verify run --rm --no-deps verify
 ```
+
+防同名容器冲突说明:编排中**不使用固定 `container_name`**,容器名由 Compose 按
+"项目名-服务名-序号"自动生成,所以机器上其他项目或上一次异常退出残留的同名容器
+不会拦截验收,命令可随时重复执行(`--rm` 退出即清理本次容器)。若需要进一步隔离,
+可显式指定项目名,例如 `docker compose -p hazmat-verify ... run --rm --no-deps verify`。
 
 该服务基于 `mcr.microsoft.com/playwright/python:v1.49.1-noble`(已预装 Chromium),
 镜像内用 **venv** 安装后端依赖以规避 Ubuntu 24.04 的 PEP 668 限制,并安装
