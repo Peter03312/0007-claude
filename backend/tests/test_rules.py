@@ -305,3 +305,147 @@ def test_three_way_forbidden_mixture_lists_all_pairs():
     (result,) = verify(assignments)
     assert result["ok"] is False
     assert result["conflicts"] == [["AA", "BB"], ["AA", "OO"]]
+
+
+# -------------------------------------------- 缺陷回归:行号错位/问题隐藏
+
+
+def test_field_error_in_first_row_does_not_shift_later_row_indices():
+    # 第 0 行库位越界;第 1、2 行编号重复。旧实现会把重复标到 0、1 行。
+    _, errors = validate_batch(
+        [
+            {"slot": 0, "container_id": "GOODID", "category": "N"},
+            r(2, "DUP1", "A"),
+            r(3, "DUP1", "B"),
+        ]
+    )
+    dup = [e for e in errors if e["code"] == "duplicate_id"]
+    assert {e["index"] for e in dup} == {1, 2}
+    bad_slot = [e for e in errors if e["code"] == "bad_slot"]
+    assert {e["index"] for e in bad_slot} == {0}
+
+
+def test_multiple_field_errors_before_duplicate_keep_original_indices():
+    # 前两行各有字段错误(过滤后列表只剩第三行起),后续重复仍须标真实行号
+    _, errors = validate_batch(
+        [
+            {"slot": 5, "container_id": "bad-id", "category": "N"},
+            {"slot": 7, "container_id": "GOOD1", "category": "X"},
+            r(1, "SAME", "N"),
+            r(2, "SAME", "N"),
+        ]
+    )
+    dup = [e for e in errors if e["code"] == "duplicate_id"]
+    assert {e["index"] for e in dup} == {2, 3}
+    # 无关的第 2、3 行本身字段合法,不被任何字段错误牵连
+    assert all(
+        e["index"] not in (2, 3)
+        for e in errors
+        if e["code"].startswith("bad_") or e["code"] == "unknown_category"
+    )
+
+
+def test_field_error_before_over_capacity_marks_correct_rows():
+    # 第 0 行库位非法(不参与容量);第 1..5 行库位 8 共 5 个 => 超容量
+    rows = [
+        {"slot": 100, "container_id": "C0", "category": "N"},
+        *[r(8, f"C{i}", "N") for i in range(1, 6)],
+    ]
+    _, errors = validate_batch(rows)
+    over = [e for e in errors if e["code"] == "slot_over_capacity"]
+    assert {e["index"] for e in over} == {1, 2, 3, 4, 5}
+    assert all(e["count"] == 5 for e in over)
+    # 第 0 行只报自己的库位错误,不被错标成超容量
+    row0 = [e for e in errors if e["index"] == 0]
+    assert [e["code"] for e in row0] == ["bad_slot"]
+
+
+def test_row_with_bad_category_still_participates_in_duplicate_id():
+    # 编号合法但类别非法的行,其编号重复问题必须同批暴露
+    _, errors = validate_batch(
+        [
+            r(1, "DUPX", "N"),
+            {"slot": 2, "container_id": "DUPX", "category": "Z"},
+        ]
+    )
+    codes_by_index: dict[int, set[str]] = {}
+    for e in errors:
+        codes_by_index.setdefault(e["index"], set()).add(e["code"])
+    assert codes_by_index == {
+        0: {"duplicate_id"},
+        1: {"unknown_category", "duplicate_id"},
+    }
+
+
+def test_row_with_bad_id_still_counts_toward_slot_capacity():
+    # 库位合法、编号非法的行也计入容量:5 行同库位须同批报超容量
+    rows = [
+        {"slot": 4, "container_id": "lower", "category": "N"},
+        *[r(4, f"C{i}", "N") for i in range(1, 5)],
+    ]
+    _, errors = validate_batch(rows)
+    over = [e for e in errors if e["code"] == "slot_over_capacity"]
+    assert {e["index"] for e in over} == {0, 1, 2, 3, 4}
+    # 第 0 行同时有编号错误与超容量,一次性都给出
+    row0 = {e["code"] for e in errors if e["index"] == 0}
+    assert row0 == {"bad_container_id", "slot_over_capacity"}
+
+
+def test_all_problems_on_one_row_reported_together():
+    # 单行:库位越界 + 编号非法 + 类别非法,三个错误一次给全
+    _, errors = validate_batch(
+        [{"slot": 0, "container_id": "小写bad", "category": "?"}]
+    )
+    assert {e["code"] for e in errors} == {
+        "bad_slot",
+        "bad_container_id",
+        "unknown_category",
+    }
+
+
+def test_field_errors_and_over_capacity_and_duplicate_all_in_one_batch():
+    # 综合场景:
+    #   行 0:库位 9 编号非法(仍计入库位 9 容量)
+    #   行 1..3:库位 9 合法行(库位 9 共 4 行,未超)
+    #   行 4:库位 9 合法行(库位 9 变 5 行 => 全部标超容量)
+    #   行 5、6:库位 1、2 同号 DUP => 重复编号
+    rows = [
+        {"slot": 9, "container_id": "bad", "category": "N"},
+        *[r(9, f"OK{i}", "N") for i in range(1, 5)],
+        r(1, "DUP", "N"),
+        r(2, "DUP", "N"),
+    ]
+    _, errors = validate_batch(rows)
+    codes_by_index: dict[int, set[str]] = {}
+    for e in errors:
+        codes_by_index.setdefault(e["index"], set()).add(e["code"])
+
+    assert codes_by_index[0] == {"bad_container_id", "slot_over_capacity"}
+    for i in (1, 2, 3, 4):
+        assert codes_by_index[i] == {"slot_over_capacity"}
+    assert codes_by_index[5] == {"duplicate_id"}
+    assert codes_by_index[6] == {"duplicate_id"}
+
+
+def test_bad_slot_row_excluded_from_capacity_but_own_error_shown():
+    # 库位字段非法的行无法计入任何库位容量,只报自身字段错误
+    rows = [
+        {"slot": 500, "container_id": "C0", "category": "N"},
+        *[r(3, f"C{i}", "N") for i in range(1, 5)],
+    ]
+    _, errors = validate_batch(rows)
+    assert [e["code"] for e in errors if e["index"] == 0] == ["bad_slot"]
+    assert not [e for e in errors if e["code"] == "slot_over_capacity"]
+
+
+def test_error_detail_sorted_by_index_then_code():
+    _, errors = validate_batch(
+        [
+            r(1, "DUP", "N"),
+            {"slot": 0, "container_id": "bad!", "category": "X"},
+            r(2, "DUP", "N"),
+        ]
+    )
+    keys = [(e["index"], e["code"]) for e in errors]
+    assert keys == sorted(keys)
+

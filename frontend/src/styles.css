@@ -115,6 +115,16 @@ button:disabled {
   background: var(--fail-bg);
 }
 
+.row-error-detail td {
+  background: var(--fail-bg);
+  padding-top: 0;
+  border-top: none;
+}
+
+.row-error-detail .field-error {
+  margin-right: 16px;
+}
+
 input.invalid,
 select.invalid {
   border-color: var(--fail);

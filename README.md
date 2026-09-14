@@ -24,8 +24,18 @@
 | 结果排序 | 先按**库位号数值升序**,再按冲突对**首项、次项** ASCII 字典序 | `backend/app/rules.py: verify()` |
 | 整批 422 | 重复编号、未知类别、重复分配(同一容器→同一库位出现多次)、超容量,或任何字段非法,均**整批返回 422** | `backend/app/main.py` + `validate_batch()` |
 
-422 响应体 `detail` 为行级错误明细数组,每项含 `index`(从 0 开始的行号)、
-`code`、`field`;前端收到后**清除旧结论并标出对应行**(行标红 + 字段红框 + 错误文案)。
+错误上报保证(值班员一次提交即可看到全部问题,无需修一轮再提交):
+
+- **行号始终是原始录入行号**:即使批次前面存在字段非法行,跨行错误(重复/超容量)
+  也标在真实出问题的行上,不会因坏行被过滤而整体错位;
+- **字段独立校验、问题不互相隐藏**:编号合法但类别非法的行仍参与重复编号检查;
+  库位合法但编号非法的行仍计入该库位容量;同一行可同时收到字段错误与跨行错误;
+- 跨行检查只纳入"相关字段合法"的行:重复编号只比较编号合法的行,
+  容量只统计目标库位合法的行,避免对非法值产生误导性派生错误。
+
+422 响应体 `detail` 为行级错误明细数组,每项含 `index`(从 0 开始的**原始**行号)、
+`code`、`field`;明细按 `(index, code)` 稳定排序。前端收到后**清除旧结论并标出对应行**
+(行标红 + 字段红框 + 错误文案;`field: null` 的行级错误如重复分配在行下方单独提示一次)。
 
 错误码:`bad_slot`、`bad_container_id`、`unknown_category`、
 `duplicate_id`、`duplicate_assignment`、`slot_over_capacity`、`row_format`。
@@ -62,8 +72,10 @@ WEB_PORT=9090 API_PORT=9000 docker compose up --build
 docker compose --profile verify run --rm verify
 ```
 
-该服务在同一容器内**真实构建前端、真实启动 FastAPI 与 nginx**,
-然后依次执行:
+该服务基于 `mcr.microsoft.com/playwright/python:v1.49.1-noble`(已预装 Chromium),
+镜像内用 **venv** 安装后端依赖以规避 Ubuntu 24.04 的 PEP 668 限制,并安装
+Node.js 20 与 nginx。启动时在同一容器内**真实构建前端、真实启动 FastAPI 与 nginx**
+(会移除 nginx 默认站并校验 :80 确实返回前端页面),然后依次执行:
 
 1. **pytest** —— 规则矩阵、边界(库位 1/99、容量 4/5、编号长度与字符集)、
    排序规范化、API 200/422;

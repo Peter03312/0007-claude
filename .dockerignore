@@ -1,0 +1,10 @@
+# 仅用于 verify 服务的根构建上下文(其 context 为仓库根)
+**/node_modules/
+**/dist/
+**/test-results/
+**/playwright-report/
+**/__pycache__/
+**/.pytest_cache/
+**/tsconfig.tsbuildinfo
+**/.venv/
+.git/

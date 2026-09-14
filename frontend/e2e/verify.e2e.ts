@@ -128,6 +128,78 @@ test("先通过后 422:旧结论被清除", async ({ page }) => {
   await expect(page.getByTestId("slot-0")).toHaveClass(/invalid/);
 });
 
+test("前面有坏行时,重复/超容量标在真实行上,且一次提交全部暴露", async ({
+  page,
+}) => {
+  // 行 0:库位越界(字段错误)
+  await fillRow(page, 0, { slot: "100", container: "C0", category: "N" });
+  // 行 1..5:全部库位 9,共 5 个 => 超容量
+  for (let i = 1; i <= 5; i++) {
+    if (i > 1) await page.getByTestId("add-row").click();
+    await fillRow(page, i, {
+      slot: "9",
+      container: `K0${i}`,
+      category: "N",
+    });
+  }
+  // 行 6、7:同号 DUP(还触发重复分配,因为同库位)
+  for (let i = 6; i <= 7; i++) {
+    await page.getByTestId("add-row").click();
+    await fillRow(page, i, {
+      slot: "2",
+      container: "DUPX",
+      category: i === 6 ? "A" : "B",
+    });
+  }
+
+  await page.getByTestId("submit").click();
+
+  await expect(page.getByTestId("batch-banner")).toBeVisible();
+
+  // 行 0:只有库位错误,不被错标超容量
+  await expect(page.getByTestId("row-0")).toHaveClass(/row-error/);
+  await expect(page.getByTestId("slot-0")).toHaveClass(/invalid/);
+
+  // 超容量标在真实的行 1..5(不是 0..4)
+  for (let i = 1; i <= 5; i++) {
+    await expect(page.getByTestId(`row-${i}`)).toHaveClass(/row-error/);
+  }
+  const overCount = await page
+    .locator('[data-testid^="row-"] .field-error')
+    .getByText(/5\/4/)
+    .count();
+  expect(overCount).toBe(5);
+
+  // 重复编号在最后两行(行 6、7),行级区显示重复分配
+  await expect(page.getByTestId("row-6")).toHaveClass(/row-error/);
+  await expect(page.getByTestId("row-7")).toHaveClass(/row-error/);
+  await expect(page.getByTestId("container-6")).toHaveClass(/invalid/);
+  await expect(page.getByTestId("container-7")).toHaveClass(/invalid/);
+  await expect(page.getByTestId("row-errors-6")).toContainText(
+    "同一容器重复分配到该库位",
+  );
+
+  // 无任何库位结论
+  await expect(page.locator('[data-testid^="slot-result-"]')).toHaveCount(0);
+});
+
+test("重复编号与库位字段错误在同一批一次性给出", async ({ page }) => {
+  // 行 0、1:编号重复(跨库位);行 2:库位越界
+  await fillRow(page, 0, { slot: "1", container: "DUPX", category: "N" });
+  await fillRow(page, 1, { slot: "2", container: "DUPX", category: "B" });
+  await page.getByTestId("add-row").click();
+  await fillRow(page, 2, { slot: "0", container: "K3", category: "O" });
+
+  await page.getByTestId("submit").click();
+
+  await expect(page.getByTestId("batch-banner")).toBeVisible();
+  await expect(page.getByTestId("container-0")).toHaveClass(/invalid/);
+  await expect(page.getByTestId("container-1")).toHaveClass(/invalid/);
+  await expect(page.getByTestId("slot-2")).toHaveClass(/invalid/);
+  // 行 2 编号本身合法,不被错标
+  await expect(page.getByTestId("container-2")).not.toHaveClass(/invalid/);
+});
+
 test("边界:库位 99 与 12 位编号合法;库位 0 与小写编号 422", async ({
   page,
 }) => {

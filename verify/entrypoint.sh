@@ -4,16 +4,24 @@ set -euo pipefail
 
 BACKEND_DIR=/work/backend
 FRONTEND_DIR=/work/frontend
+VENV=/opt/venv
+
+# 该镜像预装的 Chromium 由 Playwright 直接使用
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
 
 echo "==> [1/5] 构建前端静态资源(React + TypeScript)"
 cd "$FRONTEND_DIR"
 npm run build
 
 echo "==> [2/5] 启动 FastAPI(:8000)与 nginx(:80,反代 /api)"
-( cd "$BACKEND_DIR" && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 ) &
+( cd "$BACKEND_DIR" && "$VENV/bin/python" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 ) &
 API_PID=$!
 
-# nginx 直接使用前端镜像里的同一份配置,root 指向本地构建产物
+# 移除 Debian/Ubuntu nginx 默认站,否则 :80 会命中 /usr/share/nginx/html
+# (或 Debian 默认欢迎页),而不是我们的前端
+rm -f /etc/nginx/sites-enabled/default
+
+# nginx 使用与 web 镜像等价的配置,root 指向本地构建产物
 cat > /etc/nginx/conf.d/default.conf <<'NGINX'
 server {
     listen 80;
@@ -42,10 +50,15 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# 确认 :80 返回的确实是前端而不是 nginx 默认页
+if ! curl -sf http://127.0.0.1:80/ | grep -q '<div id="root">'; then
+  echo "!! nginx 未返回前端页面(可能命中默认站)"; exit 1
+fi
+
 STATUS=0
 
 echo "==> [3/5] pytest(规则引擎 + API 边界)"
-( cd "$BACKEND_DIR" && python -m pytest -q ) || STATUS=1
+( cd "$BACKEND_DIR" && "$VENV/bin/python" -m pytest -q ) || STATUS=1
 
 echo "==> [4/5] Vitest(前端 API 封装与页面交互)"
 ( cd "$FRONTEND_DIR" && npx vitest run ) || STATUS=1

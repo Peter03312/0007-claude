@@ -51,12 +51,25 @@ def forbidden(a: str, b: str) -> bool:
     return tuple(sorted((a, b))) in FORBIDDEN_PAIRS
 
 
-def _validate_row(
-    index: int, raw: Any
-) -> tuple[Assignment | None, list[dict[str, Any]]]:
-    """校验单条录入;返回(合法时的 Assignment,行级错误列表)。
+@dataclass(frozen=True)
+class _ParsedRow:
+    """单行各字段独立解析结果。
 
-    行级错误只检查字段自身格式(库位号、容器编号、类别);
+    各字段独立合法、独立保留:某字段非法不会让该行其余合法字段
+    从跨行检查中消失,保证一次提交就能同时暴露字段错误与
+    重复编号/重复分配/超容量问题。
+    """
+
+    index: int
+    slot: int | None
+    container_id: str | None
+    category: str | None
+
+
+def _parse_row(index: int, raw: Any) -> tuple[_ParsedRow | None, list[dict[str, Any]]]:
+    """逐字段校验单条录入;返回(各字段解析结果,行级错误列表)。
+
+    行格式错误(非对象)时返回 None。字段级错误全部按原始行号上报,
     跨行规则(重复编号、重复分配、超容量)在 validate_batch 中处理。
     """
 
@@ -101,9 +114,15 @@ def _validate_row(
             }
         )
 
-    if not (slot_ok and id_ok and category_ok):
-        return None, errors
-    return Assignment(slot=slot, container_id=container_id, category=category), []  # type: ignore[arg-type]
+    return (
+        _ParsedRow(
+            index=index,
+            slot=slot if slot_ok else None,
+            container_id=container_id if id_ok else None,
+            category=category if category_ok else None,
+        ),
+        errors,
+    )
 
 
 def validate_batch(
@@ -112,28 +131,32 @@ def validate_batch(
     """整批校验。返回(合法录入列表,错误明细列表)。
 
     任一错误存在时,合法列表为空(整批拒绝,不产生任何结论)。
-    错误行标出方式:重复编号标所有同号行,重复分配标所有同对行,
-    超容量标该库位上的所有行。
+    所有 index 均为原始录入行号(从 0 开始),与字段非法行是否存在无关。
+    一次提交即同时给出字段错误与全部跨行错误:
+      - 重复编号:在所有"编号字段合法"的行之间检查,标出全部同号行;
+      - 重复分配:在"编号、库位均合法"的行之间检查,标出全部同对行;
+      - 超容量:该库位上所有"库位字段合法"的行都计入容量并全部标出。
     """
 
-    assignments: list[Assignment] = []
+    parsed: list[_ParsedRow | None] = []
     errors: list[dict[str, Any]] = []
 
     for index, raw in enumerate(rows):
-        assignment, row_errors = _validate_row(index, raw)
+        row, row_errors = _parse_row(index, raw)
+        parsed.append(row)
         errors.extend(row_errors)
-        if assignment is not None:
-            assignments.append(assignment)
 
-    # 重复容器编号:全批唯一,一个编号只能出现一次(即便去不同库位也不允许)
+    valid_rows = [row for row in parsed if row is not None]
+
+    # 重复容器编号:全批唯一(即便去不同库位也不允许)。
+    # 只比较编号字段合法的行,避免把非法编号误判成"重复"。
     id_rows: dict[str, list[int]] = defaultdict(list)
-    for i, a in enumerate(assignments):
-        id_rows[a.container_id].append(i)
-    duplicate_id_rows: set[int] = set()
+    for row in valid_rows:
+        if row.container_id is not None:
+            id_rows[row.container_id].append(row.index)
     for container_id, row_indices in id_rows.items():
         if len(row_indices) > 1:
             for i in row_indices:
-                duplicate_id_rows.add(i)
                 errors.append(
                     {
                         "index": i,
@@ -145,8 +168,9 @@ def validate_batch(
 
     # 重复分配:同一(容器编号,目标库位)对出现两次以上
     pair_rows: dict[tuple[str, int], list[int]] = defaultdict(list)
-    for i, a in enumerate(assignments):
-        pair_rows[(a.container_id, a.slot)].append(i)
+    for row in valid_rows:
+        if row.container_id is not None and row.slot is not None:
+            pair_rows[(row.container_id, row.slot)].append(row.index)
     for (container_id, slot), row_indices in pair_rows.items():
         if len(row_indices) > 1:
             for i in row_indices:
@@ -160,10 +184,12 @@ def validate_batch(
                     }
                 )
 
-    # 库位容量:每位最多 4 个容器
+    # 库位容量:每位最多 4 个容器。目标库位合法的行都计入容量,
+    # 即使该行其他字段(编号/类别)非法,也不隐藏超容量问题。
     slot_rows: dict[int, list[int]] = defaultdict(list)
-    for i, a in enumerate(assignments):
-        slot_rows[a.slot].append(i)
+    for row in valid_rows:
+        if row.slot is not None:
+            slot_rows[row.slot].append(row.index)
     for slot, row_indices in slot_rows.items():
         if len(row_indices) > MAX_CONTAINERS_PER_SLOT:
             for i in row_indices:
@@ -179,7 +205,14 @@ def validate_batch(
                 )
 
     if errors:
+        # 稳定排序:先按原始行号、再按错误码,前端标行与排查都有确定顺序
+        errors.sort(key=lambda e: (e["index"], e["code"]))
         return [], errors
+
+    assignments = [
+        Assignment(slot=row.slot, container_id=row.container_id, category=row.category)  # type: ignore[arg-type]
+        for row in valid_rows
+    ]
     return assignments, []
 
 

@@ -177,6 +177,87 @@ describe("App 核验台交互", () => {
     expect(screen.getByTestId("row-0")).toHaveClass("row-error");
   });
 
+  it("前面存在坏行时,跨行错误仍标在真实行上", async () => {
+    // 后端语义回归:第 0 行库位越界,重复编号发生在第 2、3 行
+    mockFetchOnce(
+      unprocessable([
+        { index: 0, code: "bad_slot", field: "slot" },
+        { index: 2, code: "duplicate_id", field: "container_id" },
+        { index: 3, code: "duplicate_id", field: "container_id" },
+      ]),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByTestId("add-row"));
+    await user.click(screen.getByTestId("add-row"));
+    await user.click(screen.getByTestId("submit"));
+
+    expect(screen.getByTestId("row-0")).toHaveClass("row-error");
+    expect(screen.getByTestId("slot-0")).toHaveClass("invalid");
+    // 无关的第 1 行不标红
+    expect(screen.getByTestId("row-1")).not.toHaveClass("row-error");
+    // 真正重复的是第 2、3 行
+    expect(screen.getByTestId("row-2")).toHaveClass("row-error");
+    expect(screen.getByTestId("row-3")).toHaveClass("row-error");
+    expect(screen.getByTestId("container-2")).toHaveClass("invalid");
+    expect(screen.getByTestId("container-3")).toHaveClass("invalid");
+  });
+
+  it("同一批内字段错误、重复编号、超容量一次性全部标出", async () => {
+    mockFetchOnce(
+      unprocessable([
+        { index: 0, code: "bad_container_id", field: "container_id" },
+        {
+          index: 0,
+          code: "slot_over_capacity",
+          field: "slot",
+          count: 5,
+          limit: 4,
+        },
+        { index: 1, code: "slot_over_capacity", field: "slot", count: 5, limit: 4 },
+        { index: 5, code: "duplicate_id", field: "container_id" },
+        { index: 6, code: "duplicate_id", field: "container_id" },
+        {
+          index: 5,
+          code: "duplicate_assignment",
+          field: null,
+          slot: 2,
+        },
+        {
+          index: 6,
+          code: "duplicate_assignment",
+          field: null,
+          slot: 2,
+        },
+      ]),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    for (let i = 0; i < 5; i++) {
+      await user.click(screen.getByTestId("add-row"));
+    }
+    await user.click(screen.getByTestId("submit"));
+
+    // 第 0 行:编号字段错误 + 库位超容量同时显示,无需二次提交
+    expect(screen.getByTestId("container-0")).toHaveClass("invalid");
+    expect(screen.getByTestId("slot-0")).toHaveClass("invalid");
+    expect(
+      within(screen.getByTestId("row-0")).getByText(
+        /容器编号须为 1 至 12 位大写字母或数字/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("row-0")).getByText(/本批 5\/4/),
+    ).toBeInTheDocument();
+
+    // field:null 的重复分配在行级错误区只出现一次(不在三个字段下重复)
+    const row5Detail = screen.getByTestId("row-errors-5");
+    const row5AssignMatches = within(row5Detail).getAllByText(
+      /同一容器重复分配到该库位/,
+    );
+    expect(row5AssignMatches).toHaveLength(1);
+  });
+
   it("清空按钮清除录入、旧结论与错误标记", async () => {
     mockFetchOnce(
       unprocessable([
